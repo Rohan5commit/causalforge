@@ -97,6 +97,7 @@ class SimulationRequest(BaseModel):
     world_model_id: str
     nodes: list[dict]
     edges: list[dict]
+    use_llm_explanation: bool = False  # opt-in NIM explanation after graph propagation
 
 
 class ExperimentRankRequest(BaseModel):
@@ -167,6 +168,199 @@ def extract_json_from_response(text: str) -> dict | list:
         elif start_arr >= 0:
             return json.loads(text[start_arr:])
         raise HTTPException(status_code=500, detail=f"Failed to parse JSON from NIM response: {text[:200]}")
+
+
+# ── Causal Graph Propagation Engine ───────────────────────────────────
+
+def propagate_intervention(
+    nodes: list[dict],
+    edges: list[dict],
+    intervention_var: str,
+    delta: float = 1.0,
+) -> dict:
+    """Deterministic BFS propagation of an intervention through a causal graph.
+
+    This is the core simulation algorithm. Given an intervention on a variable,
+    it propagates effects forward through the directed causal graph, computing
+    direction, magnitude, and confidence for each affected variable.
+
+    Args:
+        nodes: List of node dicts with 'id' and 'label' keys.
+        edges: List of edge dicts with 'source', 'target', 'sign', 'strength',
+                'confidence', and 'conflictLevel' keys.
+        intervention_var: The variable ID being intervened on.
+        delta: The magnitude of intervention (+1.0 for increase, -1.0 for decrease).
+
+    Returns:
+        dict with 'predictedEffects', 'overallConfidence', 'sensitivityToUncertainty',
+        'propagationTraces', and 'summary'.
+    """
+    node_lookup = {n["id"]: n for n in nodes}
+    # Build adjacency list: source -> [(edge, target)]
+    adjacency: dict[str, list[tuple[dict, str]]] = {}
+    for edge in edges:
+        src = edge.get("source", "")
+        tgt = edge.get("target", "")
+        if src and tgt:
+            adjacency.setdefault(src, []).append((edge, tgt))
+
+    # BFS propagation using topological accumulation.
+    # We collect ALL incoming effects per variable (multi-path convergence),
+    # then propagate the aggregated effect forward.
+    # Each queue entry: (variable_id, effect_value, cumulative_confidence, path, depth)
+    queue = [(intervention_var, delta, 1.0, [intervention_var], 0)]
+    # Track all incoming contributions per variable for convergence handling
+    incoming_effects: dict[str, list[tuple[float, float, list[str]]]] = {intervention_var: [(delta, 1.0, [intervention_var])]} 
+    processed = set()  # variables we've already propagated forward from
+
+    while queue:
+        var, effect, conf, path, depth = queue.pop(0)
+
+        if var not in node_lookup:
+            continue
+
+        # For the intervention variable, always process.
+        # For others, only process once we've collected all incoming contributions
+        # (BFS level-order ensures parents are processed before children in a DAG).
+        if var != intervention_var and var in processed:
+            continue
+
+        # Aggregate all incoming effects for this variable
+        contributions = incoming_effects.get(var, [(effect, conf, path)])
+        if var == intervention_var:
+            agg_effect = effect
+            agg_conf = conf
+            best_path = path
+        else:
+            # Sum effects from all paths (convergent edges)
+            agg_effect = sum(e for e, _, _ in contributions)
+            # Confidence = max confidence across incoming paths (best evidence)
+            agg_conf = max(c for _, c, _ in contributions)
+            # Path = shortest path
+            best_path = min(contributions, key=lambda x: len(x[2]))[2]
+
+        processed.add(var)
+
+        # Propagate to downstream variables
+        for edge, target_id in adjacency.get(var, []):
+            sign = 1.0 if edge.get("sign", "positive") == "positive" else -1.0
+            strength = float(edge.get("strength", 0.5))
+            edge_conf = float(edge.get("confidence", 0.5))
+            conflict = float(edge.get("conflictLevel", 0.0))
+            evidence_count = int(edge.get("evidenceCount", 1))
+
+            # Reduce confidence based on conflict level
+            adjusted_conf = edge_conf * (1.0 - conflict * 0.5)
+            # Boost confidence slightly with more evidence (capped at 1.0)
+            evidence_boost = min(evidence_count / 3.0, 1.0)
+            adjusted_conf = adjusted_conf * (0.7 + 0.3 * evidence_boost)
+
+            new_effect = agg_effect * sign * strength
+            new_conf = agg_conf * adjusted_conf
+            new_path = best_path + [target_id]
+
+            # Record this incoming contribution for the target
+            incoming_effects.setdefault(target_id, []).append((new_effect, new_conf, new_path))
+
+            if depth + 1 <= 8:  # max propagation depth
+                queue.append((target_id, new_effect, new_conf, new_path, depth + 1))
+
+    # Build results from processed set (skip the intervention variable itself)
+    predicted_effects = []
+    confidences = []
+
+    node_label = {n["id"]: n.get("label", n["id"]) for n in nodes}
+    edge_uncertainty_scores = []
+    final_effects: dict[str, tuple[float, float, list[str], int]] = {}
+
+    # Aggregate final effects from all incoming contributions per variable
+    for var_id, contributions in incoming_effects.items():
+        if var_id == intervention_var:
+            continue
+        agg_effect = sum(e for e, _, _ in contributions)
+        agg_conf = max(c for _, c, _ in contributions)
+        best_path = min(contributions, key=lambda x: len(x[2]))[2]
+        # Estimate depth from path length
+        depth = len(best_path) - 1
+        final_effects[var_id] = (agg_effect, agg_conf, best_path, depth)
+
+    for var_id, (effect, conf, path, depth) in final_effects.items():
+        if effect == 0.0:
+            direction = "no_change"
+        elif effect > 0:
+            direction = "positive"
+        else:
+            direction = "negative"
+
+        magnitude = min(abs(effect), 1.0)
+
+        # Evidence strength based on confidence
+        if conf >= 0.7:
+            evidence_strength = "strong"
+        elif conf >= 0.4:
+            evidence_strength = "moderate"
+        else:
+            evidence_strength = "weak"
+
+        predicted_effects.append({
+            "variableId": var_id,
+            "variableLabel": node_label.get(var_id, var_id),
+            "direction": direction,
+            "magnitude": round(magnitude, 4),
+            "confidence": round(conf, 4),
+            "causalPath": path,
+            "pathLength": len(path) - 1,
+            "evidenceStrength": evidence_strength,
+        })
+        confidences.append(conf)
+
+    # Compute overall metrics
+    overall_confidence = round(sum(confidences) / len(confidences), 4) if confidences else 0.0
+
+    # Sensitivity to uncertainty: avg of conflict levels on traversal edges
+    for edge in edges:
+        edge_uncertainty_scores.append(float(edge.get("conflictLevel", 0.0)) +
+                                       float(1.0 - edge.get("confidence", 0.5)))
+    sensitivity = round(
+        sum(edge_uncertainty_scores) / len(edge_uncertainty_scores), 4
+    ) if edge_uncertainty_scores else 0.5
+
+    # Build propagation traces for debugging
+    traces = []
+    for var_id, (effect, conf, path, depth) in final_effects.items():
+        traces.append({
+            "variable": var_id,
+            "label": node_label.get(var_id, var_id),
+            "effect": round(effect, 4),
+            "confidence": round(conf, 4),
+            "path": " → ".join(path),
+            "depth": depth,
+        })
+    traces.sort(key=lambda t: t["depth"])
+
+    # Generate deterministic summary
+    if not predicted_effects:
+        summary = (f"No downstream effects found for intervention on '{intervention_var}'. "
+                   "The variable may be a leaf node with no outgoing causal edges.")
+    else:
+        pos = [e for e in predicted_effects if e["direction"] == "positive"]
+        neg = [e for e in predicted_effects if e["direction"] == "negative"]
+        parts = []
+        if pos:
+            parts.append(f"{len(pos)} positive effect(s): {', '.join(e['variableLabel'] for e in pos[:3])}")
+        if neg:
+            parts.append(f"{len(neg)} negative effect(s): {', '.join(e['variableLabel'] for e in neg[:3])}")
+        summary = (f"Intervention on '{intervention_var}' propagates to {len(predicted_effects)} "
+                   f"variable(s). {' '.join(parts)} "
+                   f"Overall confidence: {overall_confidence:.0%}.")
+
+    return {
+        "predictedEffects": predicted_effects,
+        "overallConfidence": overall_confidence,
+        "sensitivityToUncertainty": sensitivity,
+        "propagationTraces": traces,
+        "summary": summary,
+    }
 
 
 # ── API Routes ──────────────────────────────────────────────────────────
@@ -398,53 +592,50 @@ Return JSON:
 
 @app.post("/api/simulate")
 async def simulate_intervention(req: SimulationRequest):
-    """Run a counterfactual simulation for an intervention."""
-    intervention = req.intervention
-    nodes_text = json.dumps([n for n in req.nodes[:30]], indent=2)
-    edges_text = json.dumps([e for e in req.edges[:50]], indent=2)
+    """Run a counterfactual simulation via deterministic BFS graph propagation.
 
-    sim_prompt = f"""You are a counterfactual simulation engine. Given a causal graph and an intervention, predict downstream effects.
+    The core math (BFS through edges, signed/strength-weighted propagation)
+    is performed deterministically in Python. NIM is only used optionally
+    for natural-language explanation of results.
+    """
+    intervention = req.intervention
+    target_var = intervention.get("targetVariable") or intervention.get("target_variable") or intervention.get("id", "")
+    change_type = intervention.get("changeType", "increase")
+    delta = -1.0 if change_type == "decrease" else 1.0
+
+    # ── 1. Deterministic graph propagation (pure Python, no LLM) ──────
+    result = propagate_intervention(
+        nodes=req.nodes,
+        edges=req.edges,
+        intervention_var=target_var,
+        delta=delta,
+    )
+
+    result["interventionId"] = intervention.get("id", "unknown")
+    result["interventionTarget"] = target_var
+    result["runAt"] = datetime.now(timezone.utc).isoformat()
+    result["method"] = "deterministic_bfs_propagation"  # mark as graph-based, not LLM
+
+    # ── 2. Optional: NIM-generated natural-language explanation ────────
+    if req.use_llm_explanation:
+        effects_text = json.dumps(result["predictedEffects"], indent=2)
+        traces_text = json.dumps(result["propagationTraces"][:10], indent=2)
+        explanation_prompt = f"""You are a causal reasoning assistant. Given the deterministic simulation results below,
+provide a brief, precise natural-language explanation of what this intervention does.
 
 Intervention: {json.dumps(intervention, indent=2)}
+Predicted Effects: {effects_text}
+Propagation Traces: {traces_text}
 
-Causal Graph Nodes: {nodes_text}
-Causal Graph Edges: {edges_text}
-
-Simulate the intervention's effects by propagating through the causal graph.
-
-For each affected variable, return:
-- variableId: the variable being affected
-- variableLabel: human-readable name
-- direction: "positive"|"negative"|"no_change"|"uncertain"
-- magnitude: 0.0-1.0 (normalized effect size)
-- confidence: 0.0-1.0 (how confident in this prediction)
-- causalPath: list of variable ids in the causal path
-- evidenceStrength: "strong"|"moderate"|"weak"
-
-Also return:
-- overallConfidence: average confidence across all effects
-- sensitivityToUncertainty: how much uncertainty in the graph affects results (0-1)
-
-Return JSON:
-{{
-  "predictedEffects": [...],
-  "overallConfidence": 0.0-1.0,
-  "sensitivityToUncertainty": 0.0-1.0,
-  "summary": "brief summary of simulation results"
-}}"""
-
-    response = call_nim([
-        {"role": "system", "content": "You are a precise counterfactual simulation engine. Return only valid JSON with predicted effects."},
-        {"role": "user", "content": sim_prompt},
-    ])
-
-    result = extract_json_from_response(response)
-    result.setdefault("predictedEffects", [])
-    result.setdefault("overallConfidence", 0.5)
-    result.setdefault("sensitivityToUncertainty", 0.5)
-    result.setdefault("summary", "")
-    result["interventionId"] = intervention.get("id", "unknown")
-    result["runAt"] = datetime.now(timezone.utc).isoformat()
+Write a 2-3 sentence explanation of the causal chain and key findings."""
+        try:
+            explanation = call_nim([
+                {"role": "system", "content": "You are a precise causal reasoning assistant. Be concise."},
+                {"role": "user", "content": explanation_prompt},
+            ], temperature=0.2, max_tokens=512)
+            result["llmExplanation"] = explanation
+        except Exception:
+            pass  # explanation is optional
 
     if db:
         sim_doc = {

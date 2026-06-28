@@ -4,6 +4,8 @@
 
 CausalForge turns scattered science into executable causal worlds — helping researchers simulate interventions, expose contradictions, and discover the next decisive experiment.
 
+> **[Read the Moonshot Paper](docs/moonshot-paper.md)** — the philosophical and technical foundation behind CausalForge, explaining why science needs an executable representation layer.
+
 ## Live Deployment
 
 | Component | URL |
@@ -51,12 +53,14 @@ Information-gain scoring ranks experiments by:
 
 ## How Simulations Work
 
-The simulator propagates interventions through the explicit causal graph:
+The simulator uses **deterministic BFS graph propagation** — not LLM inference. The math is performed entirely in Python:
 1. Identify the intervention target variable
-2. Apply the change (increase/decrease/binary)
-3. Propagate effects through causal edges, weighted by sign and strength
-4. Aggregate confidence based on evidence counts and conflict levels
-5. Return predicted effects with uncertainty bounds
+2. Apply the change (increase/decrease/binary) as a signed delta
+3. BFS through outgoing causal edges, multiplying by sign, strength, and edge confidence
+4. Discount confidence based on edge conflict levels
+5. Return predicted effects with direction, magnitude, confidence, and full propagation traces
+
+> NIM is only used optionally for natural-language explanation of results — the core simulation is **deterministic and inspectable**.
 
 ## How Experiment Ranking Works
 
@@ -141,9 +145,13 @@ python main.py
 
 - Demo mode uses preloaded data for instant experience
 - Live extraction requires NVIDIA NIM API key
-- Simulation is simplified (propagation through graph, not full Bayesian inference)
+- Simulation uses deterministic BFS propagation through the causal graph (not full Bayesian inference)
 - Graph layout is pre-computed for demo; production would use force-directed layout
 - Evidence inspector shows demo excerpts; full version traces to actual paper sections
+
+## Moonshot Paper
+
+The full philosophical and technical foundation is documented in **[docs/moonshot-paper.md](docs/moonshot-paper.md)**. This paper explains the first-principles insight that *science is not a collection of facts but a web of causal relationships* — and why making that web executable is the key to faster discovery.
 
 ## Future Work
 
