@@ -78,17 +78,44 @@ Experiments are ranked by expected information gain:
 - **Data Store**: MongoDB Atlas
 - **Visualization**: Custom SVG graph rendering with D3-inspired layout
 
-## MongoDB Atlas
+## MongoDB Atlas Integration
 
-MongoDB Atlas stores and supports:
-- Ingested document metadata
-- Extracted scientific claims
-- Graph node/edge state
-- Contradiction records
-- Simulation runs
-- Experiment recommendations
+CausalForge uses MongoDB Atlas as its core data layer, going far beyond simple storage:
 
-Atlas provides the flexible document model ideal for heterogeneous scientific data, with the scalability to handle large corpora and the query power needed for evidence retrieval.
+### Atlas Vector Search — Semantic Similarity
+Every extracted claim is embedded into a 1024-dimensional vector using NVIDIA NIM's `nv-embedqa-e5-v5` model and stored in Atlas. The `/api/search/semantic` endpoint uses Atlas Vector Search (`$vectorSearch`) to find claims that are semantically similar to a natural-language query — enabling cross-paper discovery that keyword search cannot achieve.
+
+### Atlas Search — Full-Text Retrieval
+The `/api/search/fulltext` endpoint uses Atlas Search (`$search`) with BM25 relevance scoring for full-text retrieval across all claim statements. Supports phrase matching, relevance ranking, and optional type filtering (e.g., only causal claims).
+
+### Search Index Management
+The backend includes programmatic index creation via `POST /api/search/indexes`, which creates:
+- **`claim_vector_index`** — Vector search index on the `embedding` field (cosine similarity, 1024 dimensions)
+- **`claim_text_index`** — Full-text search index on `statement` and `type` fields (luceneStandard analyzer)
+
+### Embedding Generation
+The `POST /api/embeddings/generate` endpoint batch-generates embeddings for all unembedded claims via NIM's embedding API, enabling semantic search across the entire claim corpus.
+
+### Endpoints
+| Endpoint | Method | Atlas Feature | Description |
+|----------|--------|---------------|-------------|
+| `/api/search/semantic` | POST | Vector Search | Find claims semantically similar to a query |
+| `/api/search/fulltext` | POST | Atlas Search | BM25 full-text retrieval with relevance scores |
+| `/api/search/indexes` | POST | — | Create Vector Search + Atlas Search indexes |
+| `/api/search/indexes` | GET | — | List all search indexes |
+| `/api/embeddings/generate` | POST | — | Generate embeddings for unembedded claims |
+
+### Collections
+| Collection | Purpose |
+|------------|---------|
+| `documents` | Ingested paper metadata and processing status |
+| `claims` | Extracted claims with embeddings for vector search |
+| `variables` | Causal graph node definitions |
+| `edges` | Causal relationships with sign, strength, confidence |
+| `contradictions` | Detected conflicts between claims |
+| `graphs` | Saved causal world models |
+| `simulations` | Simulation run history |
+| `experiments` | Ranked experiment recommendations |
 
 ## Setup
 

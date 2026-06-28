@@ -148,7 +148,7 @@ async def seed():
             await col.insert_many(data)
         print(f"  ✓ Seeded {len(data)} records into '{name}'")
 
-    # Create indexes
+    # Create standard indexes
     await db.documents.create_index("domain")
     await db.claims.create_index("documentId")
     await db.claims.create_index("type")
@@ -156,14 +156,82 @@ async def seed():
     await db.edges.create_index("target")
     await db.contradictions.create_index("severity")
     await db.graphs.create_index("domain")
-    print("  ✓ Created indexes")
+    print("  ✓ Created standard indexes")
+
+    # Create Atlas Search indexes
+    # 1. Vector Search index for semantic similarity on claim embeddings
+    try:
+        await db.claims.create_search_index({
+            "name": "claim_vector_index",
+            "definition": {
+                "fields": [{
+                    "type": "vector",
+                    "path": "embedding",
+                    "numDimensions": 1024,
+                    "similarity": "cosine",
+                }]
+            },
+        })
+        print("  ✓ Created claim_vector_index (Atlas Vector Search)")
+    except Exception as e:
+        if "already exists" in str(e).lower():
+            print("  ✓ claim_vector_index already exists")
+        else:
+            print(f"  ⚠ Vector index: {e}")
+
+    # 2. Full-text Search index for BM25 claim retrieval
+    try:
+        await db.claims.create_search_index({
+            "name": "claim_text_index",
+            "definition": {
+                "mappings": {
+                    "dynamic": False,
+                    "fields": {
+                        "statement": {"type": "string", "analyzer": "luceneStandard"},
+                        "type": {"type": "string", "analyzer": "luceneKeyword"},
+                    },
+                }
+            },
+        })
+        print("  ✓ Created claim_text_index (Atlas Search)")
+    except Exception as e:
+        if "already exists" in str(e).lower():
+            print("  ✓ claim_text_index already exists")
+        else:
+            print(f"  ⚠ Text index: {e}")
+
+    # Generate embeddings for claims using NIM embedding model
+    print("  Generating claim embeddings...")
+    try:
+        from openai import OpenAI
+        nim_key = os.getenv("NIM_API_KEY", "")
+        if nim_key:
+            nim = OpenAI(base_url="https://integrate.api.nvidia.com/v1", api_key=nim_key)
+            statements = [c["statement"] for c in CLAIMS]
+            resp = nim.embeddings.create(model="nvidia/nv-embedqa-e5-v5", input=statements, encoding_format="float")
+            for claim, embedding in zip(CLAIMS, resp.data):
+                await db.claims.update_one(
+                    {"_id": claim["_id"]},
+                    {"$set": {"embedding": embedding.embedding}},
+                )
+            print(f"  ✓ Generated embeddings for {len(CLAIMS)} claims (1024-dim, nv-embedqa-e5-v5)")
+        else:
+            print("  ⚠ NIM_API_KEY not set — skipping embedding generation")
+    except Exception as e:
+        print(f"  ⚠ Embedding generation failed: {e}")
 
     # Verify
     for name in collections:
         count = await db[name].count_documents({})
         print(f"  ✓ Verified: {name} has {count} documents")
 
+    # Check embedding coverage
+    with_embed = await db.claims.count_documents({"embedding": {"$exists": True}})
+    total_claims = await db.claims.count_documents({})
+    print(f"  ✓ Claims with embeddings: {with_embed}/{total_claims}")
+
     print("\n✓ Atlas seed complete. Database: causalforge")
+    print("  Features: Vector Search (semantic), Atlas Search (full-text), Claim Embeddings")
     client.close()
 
 

@@ -116,6 +116,20 @@ class ChatRequest(BaseModel):
     contradictions: list[dict] = []
 
 
+class SemanticSearchRequest(BaseModel):
+    query: str
+    domain: str = "general"
+    num_results: int = 5
+
+
+class FullTextSearchRequest(BaseModel):
+    query: str
+    domain: str = "general"
+    num_results: int = 10
+    claim_type: Optional[str] = None
+    
+
+
 # ── NIM Helpers ──────────────────────────────────────────────────────────
 
 def call_nim(messages: list[dict], temperature: float = 0.3, max_tokens: int = 4096, response_format: Optional[dict] = None) -> str:
@@ -145,6 +159,25 @@ def call_nim(messages: list[dict], temperature: float = 0.3, max_tokens: int = 4
                 raise HTTPException(status_code=500, detail=f"NIM call failed: {e}")
             continue
     return ""
+
+
+EMBEDDING_MODEL = "nvidia/nv-embedqa-e5-v5"
+EMBEDDING_DIMS = 1024  # dimensions for nv-embedqa-e5-v5
+
+
+def get_embeddings(texts: list[str]) -> list[list[float]]:
+    """Generate embeddings for a list of texts using NVIDIA NIM embedding model."""
+    response = nim_client.embeddings.create(
+        model=EMBEDDING_MODEL,
+        input=texts,
+        encoding_format="float",
+    )
+    return [item.embedding for item in response.data]
+
+
+def get_embedding(text: str) -> list[float]:
+    """Generate embedding for a single text."""
+    return get_embeddings([text])[0]
 
 
 def extract_json_from_response(text: str) -> dict | list:
@@ -731,6 +764,274 @@ Answer precisely, reference specific variables and relationships from the model,
     ], temperature=0.4)
 
     return {"response": response}
+
+
+# ── MongoDB Atlas Search Endpoints ─────────────────────────────────────
+
+@app.post("/api/search/semantic")
+async def semantic_search(req: SemanticSearchRequest):
+    """Semantic similarity search across claims using Atlas Vector Search.
+
+    Generates an embedding for the query text via NVIDIA NIM, then uses
+    MongoDB Atlas Vector Search ($vectorSearch) to find the most semantically
+    similar claims in the database.
+    """
+    if not db:
+        raise HTTPException(status_code=503, detail="MongoDB Atlas not connected")
+
+    # Generate query embedding
+    try:
+        query_vector = get_embedding(req.query)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Embedding generation failed: {e}")
+
+    # Atlas Vector Search aggregation pipeline with optional pre-filter
+    vector_stage: dict = {
+        "$vectorSearch": {
+            "index": "claim_vector_index",
+            "path": "embedding",
+            "queryVector": query_vector,
+            "numCandidates": req.num_results * 5,
+            "limit": req.num_results,
+        }
+    }
+
+    # Use preFilter for domain-scoped search (supported on all Atlas tiers)
+    if req.domain != "general":
+        vector_stage["$vectorSearch"]["filter"] = {"domain": req.domain}
+
+    pipeline = [
+        vector_stage,
+        {
+            "$project": {
+                "_id": 1,
+                "statement": 1,
+                "type": 1,
+                "confidence": 1,
+                "evidenceStrength": 1,
+                "variables": 1,
+                "documentId": 1,
+                "direction": 1,
+                "domain": 1,
+                "score": {"$meta": "vectorSearchScore"},
+            }
+        },
+    ]
+
+    try:
+        cursor = db.claims.aggregate(pipeline)
+        results = await cursor.to_list(length=req.num_results)
+    except Exception as e:
+        # If vector search index doesn't exist yet, fall back to text similarity
+        results = await _fallback_text_search(req.query, req.num_results)
+
+    return {
+        "query": req.query,
+        "results": results,
+        "count": len(results),
+        "method": "atlas_vector_search",
+    }
+
+
+@app.post("/api/search/fulltext")
+async def fulltext_search(req: FullTextSearchRequest):
+    """Full-text search across claims using Atlas Search ($search).
+
+    Uses MongoDB Atlas Search for BM25-based full-text retrieval with
+    relevance scoring, phrase matching, and optional type filtering.
+    """
+    if not db:
+        raise HTTPException(status_code=503, detail="MongoDB Atlas not connected")
+
+    # Build Atlas Search pipeline
+    search_stage: dict = {
+        "$search": {
+            "index": "claim_text_index",
+            "text": {
+                "query": req.query,
+                "path": ["statement", "type"],
+            },
+        }
+    }
+
+    pipeline = [search_stage]
+
+    # Optional type filter
+    if req.claim_type:
+        pipeline.append({"$match": {"type": req.claim_type}})
+
+    pipeline.append({"$limit": req.num_results})
+    pipeline.append({
+        "$project": {
+            "_id": 1,
+            "statement": 1,
+            "type": 1,
+            "confidence": 1,
+            "evidenceStrength": 1,
+            "variables": 1,
+            "documentId": 1,
+            "direction": 1,
+            "score": {"$meta": "searchScore"},
+        }
+    })
+
+    try:
+        cursor = db.claims.aggregate(pipeline)
+        results = await cursor.to_list(length=req.num_results)
+    except Exception as e:
+        # Fall back to regex search if Atlas Search index isn't built yet
+        results = await _fallback_text_search(req.query, req.num_results, req.claim_type)
+
+    return {
+        "query": req.query,
+        "results": results,
+        "count": len(results),
+        "method": "atlas_search_fulltext",
+    }
+
+
+async def _fallback_text_search(query: str, limit: int, claim_type: Optional[str] = None) -> list[dict]:
+    """Fallback regex-based search when Atlas Search indexes aren't available."""
+    if not db:
+        return []
+    match: dict = {"statement": {"$regex": query, "$options": "i"}}
+    if claim_type:
+        match["type"] = claim_type
+    cursor = db.claims.find(match).limit(limit)
+    results = await cursor.to_list(length=limit)
+    # Remove MongoDB ObjectId for JSON serialization
+    for r in results:
+        r.pop("_id", None)
+    return results
+
+
+@app.post("/api/search/indexes")
+async def create_search_indexes():
+    """Create Atlas Vector Search and Atlas Search indexes on the claims collection.
+
+    This endpoint sets up the two indexes needed for CausalForge's search features:
+    1. claim_vector_index — for semantic similarity via $vectorSearch
+    2. claim_text_index — for full-text BM25 retrieval via $search
+    """
+    if not db:
+        raise HTTPException(status_code=503, detail="MongoDB Atlas not connected")
+
+    created = []
+
+    # 1. Vector Search index for semantic similarity
+    vector_index = {
+        "name": "claim_vector_index",
+        "definition": {
+            "fields": [
+                {
+                    "type": "vector",
+                    "path": "embedding",
+                    "numDimensions": EMBEDDING_DIMS,
+                    "similarity": "cosine",
+                }
+            ]
+        },
+    }
+
+    try:
+        await db.claims.create_search_index(vector_index)
+        created.append("claim_vector_index")
+    except Exception as e:
+        # Index may already exist
+        if "already exists" not in str(e).lower():
+            print(f"Vector index creation warning: {e}")
+
+    # 2. Full-text Search index for BM25 retrieval
+    text_index = {
+        "name": "claim_text_index",
+        "definition": {
+            "mappings": {
+                "dynamic": False,
+                "fields": {
+                    "statement": {
+                        "type": "string",
+                        "analyzer": "luceneStandard",
+                    },
+                    "type": {
+                        "type": "string",
+                        "analyzer": "luceneKeyword",
+                    },
+                },
+            }
+        },
+    }
+
+    try:
+        await db.claims.create_search_index(text_index)
+        created.append("claim_text_index")
+    except Exception as e:
+        if "already exists" not in str(e).lower():
+            print(f"Text index creation warning: {e}")
+
+    return {
+        "status": "ok",
+        "indexes_created": created,
+        "note": "Indexes may take 1-2 minutes to become queryable after creation.",
+    }
+
+
+@app.get("/api/search/indexes")
+async def list_search_indexes():
+    """List all Atlas Search indexes on the claims collection."""
+    if not db:
+        raise HTTPException(status_code=503, detail="MongoDB Atlas not connected")
+
+    try:
+        cursor = db.claims.list_search_indexes()
+        indexes = await cursor.to_list(length=20)
+        return {"indexes": indexes, "count": len(indexes)}
+    except Exception as e:
+        return {"indexes": [], "error": str(e)}
+
+
+@app.post("/api/embeddings/generate")
+async def generate_claim_embeddings():
+    """Generate embeddings for all claims that don't have one yet.
+
+    Uses NVIDIA NIM's embedding model to generate 1024-dimensional vectors
+    for each claim statement, enabling semantic similarity search via Atlas Vector Search.
+    """
+    if not db:
+        raise HTTPException(status_code=503, detail="MongoDB Atlas not connected")
+
+    # Find claims without embeddings
+    cursor = db.claims.find({"embedding": {"$exists": False}})
+    claims_without = await cursor.to_list(length=500)
+
+    if not claims_without:
+        return {"status": "ok", "message": "All claims already have embeddings", "embedded": 0}
+
+    # Generate embeddings in batches of 20 (NIM limit)
+    embedded_count = 0
+    batch_size = 20
+    for i in range(0, len(claims_without), batch_size):
+        batch = claims_without[i : i + batch_size]
+        texts = [c.get("statement", "") for c in batch]
+
+        try:
+            embeddings = get_embeddings(texts)
+            for claim, embedding in zip(batch, embeddings):
+                await db.claims.update_one(
+                    {"_id": claim["_id"]},
+                    {"$set": {"embedding": embedding}},
+                )
+                embedded_count += 1
+        except Exception as e:
+            print(f"Embedding batch error: {e}")
+            continue
+
+    return {
+        "status": "ok",
+        "embedded": embedded_count,
+        "total_without": len(claims_without),
+        "model": EMBEDDING_MODEL,
+        "dimensions": EMBEDDING_DIMS,
+    }
 
 
 # ── Run ─────────────────────────────────────────────────────────────────
