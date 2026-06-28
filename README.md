@@ -4,6 +4,15 @@
 
 CausalForge turns scattered science into executable causal worlds — helping researchers simulate interventions, expose contradictions, and discover the next decisive experiment.
 
+## Live Deployment
+
+| Component | URL |
+|-----------|-----|
+| **Frontend** | https://causalforge.vercel.app |
+| **Backend API** | https://causalforge-engine-production.up.railway.app |
+| **Health Check** | https://causalforge-engine-production.up.railway.app/health |
+| **GitHub** | https://github.com/Rohan5commit/causalforge |
+
 ## The Problem
 
 Humanity stores science in documents. Documents are readable but not executable. This slows discovery and hides contradictions. We have extraordinary tools for finding papers (Google Scholar), reading papers (PubMed), and summarizing papers (AI chatbots). But we have built almost nothing for making science executable — for turning the relationships described in papers into structures we can simulate, test, and reason about.
