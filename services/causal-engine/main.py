@@ -19,14 +19,15 @@ from motor.motor_asyncio import AsyncIOMotorClient
 import numpy as np
 
 # ── Config ──────────────────────────────────────────────────────────────
-NIM_API_KEY = os.getenv("NIM_API_KEY", "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")
+NIM_API_KEY = os.getenv("NIM_API_KEY", "")
+if not NIM_API_KEY:
+    raise RuntimeError("NIM_API_KEY environment variable is required")
 NIM_BASE_URL = "https://integrate.api.nvidia.com/v1"
 NIM_MODEL = "nvidia/llama-3.1-70b-instruct"
 
-MONGODB_URI = os.getenv(
-    "MONGODB_URI",
-    "mongodb+srv://causalforge:causalforge@cluster0.abc123.mongodb.net/causalforge?retryWrites=true&w=majority"
-)
+MONGODB_URI = os.getenv("MONGODB_URI", "")
+if not MONGODB_URI:
+    raise RuntimeError("MONGODB_URI environment variable is required")
 MONGODB_DB = os.getenv("MONGODB_DB", "causalforge")
 
 # ── Clients ─────────────────────────────────────────────────────────────
