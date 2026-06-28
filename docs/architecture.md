@@ -23,7 +23,7 @@ apps/web/src/
 │   ├── layout.tsx          # Root layout with dark navigation
 │   ├── page.tsx            # Landing page
 │   ├── demo/page.tsx       # Demo pipeline visualization
-│   ├── world-model/page.tsx # Causal graph interactive viewer
+│   ├── causal-graph/page.tsx # Causal graph interactive viewer
 │   ├── contradictions/page.tsx # Contradiction inspector
 │   ├── simulator/page.tsx  # Intervention simulator
 │   ├── experiments/page.tsx # Next-best-experiment ranking
@@ -41,7 +41,9 @@ apps/web/src/
 ```
 services/causal-engine/
 ├── main.py                 # FastAPI application
-├── .env                    # Environment variables
+├── .env                    # Environment variables (see .env.example)
+├── .env.example            # Template for required env vars
+├── seed_atlas.py           # Atlas seeding + search index creation
 └── requirements.txt        # Python dependencies
 ```
 
@@ -56,7 +58,7 @@ services/causal-engine/
 | `/api/contradictions/detect` | POST | Detect contradictions in claims |
 | `/api/simulate` | POST | Run counterfactual simulation |
 | `/api/experiments/rank` | POST | Rank next best experiments |
-| `/api/chat` | POST | Grounded Q&A from world model |
+| `/api/chat` | POST | Grounded Q&A from causal graph |
 
 ### Shared Types
 
