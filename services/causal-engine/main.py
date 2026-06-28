@@ -13,10 +13,9 @@ from typing import Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from openai import OpenAI
 from motor.motor_asyncio import AsyncIOMotorClient
-import numpy as np
 
 # ── Config ──────────────────────────────────────────────────────────────
 NIM_API_KEY = os.getenv("NIM_API_KEY", "")
