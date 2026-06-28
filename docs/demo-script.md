@@ -25,8 +25,8 @@
 
 "The system extracted 11 claims, 8 variables, 10 causal edges, and found 3 contradictions."
 
-## 1:10-1:40 — Causal Map
-[Click "Explore Causal Map"]
+## 1:10-1:40 — Causal Graph
+[Click "Explore Causal Graph"]
 
 "Here's the causal world model. Every node is a variable — cool roofs, tree canopy, surface albedo, heat island intensity. Every edge is a causal relationship with a sign, strength, and confidence score."
 

@@ -165,7 +165,7 @@ python main.py
 2. Click "Try Demo" on the landing page
 3. Select the Urban Heat Mitigation domain
 4. Click "Run Full Demo" to see the pipeline execute
-5. Explore the Causal Map, Contradictions, Simulator, and Experiments pages
+5. Explore the Causal Graph, Contradictions, Simulator, and Experiments pages
 6. Use "Ask CausalForge" to query the model in natural language
 
 ## Limitations

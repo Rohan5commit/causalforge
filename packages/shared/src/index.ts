@@ -122,8 +122,8 @@ export interface ExperimentRecommendation {
   relatedContradictions: string[];
 }
 
-// ── World Model Snapshot ──
-export interface WorldModelSnapshot {
+// ── Causal Graph (previously "World Model") ──
+export interface CausalGraphSnapshot {
   id: string;
   domain: string;
   nodes: VariableNode[];
@@ -148,11 +148,11 @@ export interface ExtractionResult {
 
 export interface SimulationRequest {
   interventionId: string;
-  worldModelId: string;
+  worldModelId: string;  // TODO: rename to causalGraphId when frontend updates
 }
 
 export interface ExperimentRankingRequest {
-  worldModelId: string;
+  worldModelId: string;  // TODO: rename to causalGraphId when frontend updates
 }
 
 export interface ChatMessage {
