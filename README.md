@@ -78,6 +78,14 @@ Experiments are ranked by expected information gain:
 - **Data Store**: MongoDB Atlas
 - **Visualization**: Custom SVG graph rendering with D3-inspired layout
 
+### Why This Stack
+
+**NVIDIA NIM over OpenAI**: NIM runs on NVIDIA's own infrastructure with lower latency for our specific use case (claim extraction + embedding in one pipeline), provides access to LLaMA 3.1 70B which handles structured JSON extraction better than GPT-3.5, and offers a free inference tier that keeps the hackathon demo running without billing.
+
+**MongoDB Atlas over Postgres**: Scientific claims are heterogeneous — a causal claim has different fields than a contradiction record or an experiment recommendation. MongoDB's flexible document model lets each collection (claims, edges, contradictions) have its own schema without migrations. Atlas Vector Search adds semantic similarity on embeddings directly in the database, eliminating a separate vector DB.
+
+**Deterministic BFS over LLM simulation**: LLMs hallucinate causal chains. Our simulator propagates interventions through the actual graph using signed, strength-weighted BFS — every prediction is traceable, reproducible, and auditable. NIM is only used for natural-language explanation of results, not for the math itself.
+
 ## MongoDB Atlas Integration
 
 CausalForge uses MongoDB Atlas as its core data layer, going far beyond simple storage:
