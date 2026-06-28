@@ -1,0 +1,17 @@
+{
+  "name": "causalforge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Executable science for discovering the next decisive experiment",
+  "scripts": {
+    "dev": "concurrently \"npm run dev:web\" \"npm run dev:backend\"",
+    "dev:web": "cd apps/web && npm run dev",
+    "dev:backend": "cd services/causal-engine && source .venv/bin/activate && python main.py",
+    "build": "cd apps/web && npm run build",
+    "test": "cd apps/web && npm test",
+    "lint": "cd apps/web && npm run lint"
+  },
+  "devDependencies": {
+    "concurrently": "^9.0.0"
+  }
+}
